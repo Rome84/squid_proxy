@@ -1,0 +1,10 @@
+---
+- name: restart squid
+  service: name=squid state=restarted
+
+- name: Regenerate GRUB
+  shell: grub2-mkconfig -o /boot/grub2/grub.cfg
+
+# - name: reload squid
+#   service: name=squid state=reloaded
+

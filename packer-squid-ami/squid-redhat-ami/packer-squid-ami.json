@@ -1,0 +1,28 @@
+{
+    "builders": [{
+      "type": "amazon-ebs",
+      "region": "us-east-1",
+      "source_ami": "ami-2051294a",
+      "instance_type": "t2.micro",
+      "ssh_username": "ec2-user",
+      "ami_name": "squid-redhat-ami-v1",
+      "ssh_pty": true
+    }],
+  
+    "provisioners": [
+     {
+        "type": "shell-local",
+        "command": "tar cf ../squid-redhat-ami.tar ../squid-redhat-ami"
+     },
+     {
+        "type": "file",
+        "source": "../squid-redhat-ami.tar",
+        "destination": "/home/ec2-user/squid-redhat-ami.tar"
+     },
+     {
+        "type": "shell",
+        "script": "provision.sh"
+     }
+    ]
+  }
+  

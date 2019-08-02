@@ -1,0 +1,948 @@
+---
+- name: Installing some basic dependencies 
+  yum:
+    name: [ wget, unzip]
+    state: present
+
+- name: upgrading openssl package
+  yum:
+    name: openssl
+    state: latest
+
+- name: Installing squid
+  yum:
+    name: squid
+    state: present
+
+- name: Disabling all ipv6
+  lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_CMDLINE_LINUX="console=ttyS0,115200n8 console=tty0 net.ifnames=0 crashkernel=auto"'
+    line: GRUB_CMDLINE_LINUX="ipv6.disable=1 console=ttyS0,115200n8 console=tty0 net.ifnames=0 crashkernel=auto" 
+  notify: Regenerate GRUB 
+
+- name: Create a cert directory if it does not exist
+  file:
+    path: /etc/squid/certs
+    state: directory
+    mode: '0755'
+    owner: squid
+    group: squid
+
+- name: Ensure SELinux is set to enforcing mode
+  lineinfile:
+    path: /etc/selinux/config
+    regexp: '^SELINUX='
+    line: SELINUX=permissive
+
+- name: Allowing local subnet
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl localnet src 172.33.0.0/16'
+    line: acl localnet src 172.33.0.0/16
+  notify: restart squid
+
+- name: Check that the /home/ec2-user/squid-ca-cert.pem exists
+  stat:
+    path: /etc/squid/certs/squid-ca-cert-key.pem
+  register: stat_result
+
+- name: Generate a Self Signed OpenSSL certificate
+  shell: openssl req -new -newkey rsa:2048 -sha256 -days 365 -nodes -x509 -extensions v3_ca -keyout /home/ec2-user/squid-ca-key.pem -out /home/ec2-user/squid-ca-cert.pem -subj "/C=US/ST=Maryland/L=Columbia/O=CMS/OU=Admin/CN=squid.cms.com" 
+  when: stat_result.stat.exists == False
+  notify: restart squid
+
+- name: Redirecting the generated certs to /etc/squid/certs
+  shell: cat /home/ec2-user/squid-ca-cert.pem /home/ec2-user/squid-ca-key.pem >> /etc/squid/certs/squid-ca-cert-key.pem
+  when: stat_result.stat.exists == False
+
+- name: Adding squid http_port
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^http_port 3128'
+    line: http_port 3128 ssl-bump cert=/etc/squid/certs/squid-ca-cert-key.pem generate-host-certificates=on dynamic_cert_mem_cache_size=16MB
+  notify: restart squid
+
+- name: Adding squid https_port
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^https_port 3129'
+    line: https_port 3129 intercept ssl-bump cert=/etc/squid/certs/squid-ca-cert-key.pem generate-host-certificates=on dynamic_cert_mem_cache_size=16MB
+  notify: restart squid
+
+- name: Adding squid sslcrtd_program
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^sslcrtd_program /usr/lib64/squid/ssl_crtd'
+    line: sslcrtd_program /usr/lib64/squid/ssl_crtd -s /var/lib/ssl_db -M 16MB
+  notify: restart squid
+
+- name: Adding squid acl step1 at_step SslBump1
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl step1 at_step SslBump1'
+    line: acl step1 at_step SslBump1
+  notify: restart squid
+
+- name: Adding squid ssl_bump peek step1
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^ssl_bump peek step1'
+    line: ssl_bump peek step1
+  notify: restart squid
+
+- name: Adding squid ssl_bump splice all
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^ssl_bump splice all'
+    line: ssl_bump splice all
+  notify: restart squid
+
+- name: Generate cert DB
+  shell: /usr/lib64/squid/ssl_crtd -c -s /var/lib/ssl_db
+  when: stat_result.stat.exists == False
+  notify: restart squid
+
+- name: Giving permissions to /var/lib/ssl_db
+  file:
+    path: /var/lib/ssl_db
+    state: directory
+    recurse: yes
+    owner: squid
+    group: squid
+
+- name: Check that the /home/ec2-user/squid-ca-cert.pem exists
+  stat:
+    path: /etc/squid/blacklist
+  register: stat_blacklist_result
+
+- name: Create a blacklist directory if it does not exist
+  file:
+    path: /etc/squid/blacklist
+    state: directory
+    mode: '0755'
+    recurse: yes
+    owner: squid
+    group: squid
+
+- name: Download shallalist
+  get_url:
+    url: http://www.shallalist.de/Downloads/shallalist.tar.gz
+    dest: /tmp/shallalist.tar.gz
+    mode: '0644'
+  when: stat_blacklist_result.stat.exists == False
+
+- name: Unarchive shallalist
+  unarchive:
+    src: /tmp/shallalist.tar.gz 
+    dest: /etc/squid/blacklist/
+    remote_src: yes
+    owner: squid
+    group: squid
+  when: stat_blacklist_result.stat.exists == False
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/adv/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/adv/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/adv/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/adv/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/science/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/science/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/science/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/science/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/webphone/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/webphone/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/webphone/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/webphone/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/ringtones/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/ringtones/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/ringtones/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/ringtones/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/hospitals/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/hospitals/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/hospitals/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/hospitals/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/fortunetelling/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/fortunetelling/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/fortunetelling/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/fortunetelling/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/military/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/military/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/military/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/military/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/dynamic/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/dynamic/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/dynamic/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/dynamic/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/violence/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/violence/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/violence/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/violence/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/remotecontrol/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/remotecontrol/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/remotecontrol/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/remotecontrol/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/homestyle/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/homestyle/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/homestyle/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/homestyle/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/aggressive/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/aggressive/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/aggressive/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/aggressive/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/searchengines/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/searchengines/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/searchengines/adv/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/searchengines/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/updatesites/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/updatesites/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/updatesites/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/updatesites/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/library/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/library/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/library/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/library/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/podcasts/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/podcasts/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/podcasts/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/podcasts/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/socialnet/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/socialnet/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/socialnet/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/socialnet/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/government/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/government/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/government/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/government/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/hacking/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/hacking/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/hacking/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/hacking/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/isp/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/isp/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/isp/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/isp/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/imagehosting/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/imagehosting/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/imagehosting/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/imagehosting/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/automobile/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/automobile/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/automobile/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/automobile/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/alcohol/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/alcohol/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/alcohol/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/alcohol/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/weapons/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/weapons/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/weapons/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/weapons/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/religion/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/religion/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/religion/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/religion/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/forum/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/forum/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/forum/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/forum/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/webtv/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/webtv/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/webtv/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/webtv/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/radiotv/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/radiotv/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/radiotv/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/radiotv/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/education/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/education/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/education/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/education/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/anonvpn/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/anonvpn/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/anonvpn/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/anonvpn/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/webradio/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/webradio/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/webradio/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/webradio/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/sex/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/sex/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/sex/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/sex/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/webmail/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/webmail/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/webmail/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/webmail/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/news/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/news/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/news/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/news/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/politics/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/politics/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/politics/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/politics/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/movies/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/movies/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/movies/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/movies/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/downloads/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/downloads/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/downloads/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/downloads/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/hobby/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/hobby/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/hobby/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/hobby/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/recreation/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/recreation/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/recreation/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/recreation/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/chat/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/chat/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/chat/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/chat/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/music/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/music/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/music/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/music/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/gamble/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/gamble/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/gamble/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/gamble/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/models/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/models/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/models/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/models/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/warez/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/warez/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/warez/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/warez/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/finance/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/finance/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/finance/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/finance/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/jobsearch/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/jobsearch/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/jobsearch/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/jobsearch/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/redirector/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/redirector/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/redirector/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/redirector/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/costtraps/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/costtraps/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/costtraps/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/costtraps/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/urlshortener/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/urlshortener/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/urlshortener/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/urlshortener/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/dating/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/dating/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/dating/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/dating/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/spyware/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/spyware/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/spyware/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/spyware/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/shopping/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/shopping/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/shopping/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/shopping/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/porn/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/porn/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/porn/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/porn/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/tracker/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/tracker/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/tracker/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/tracker/urls"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/drugs/domains"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/drugs/domains"
+  notify: restart squid
+
+- name: Adding blocked_sites ACL domains & Urls
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl blocked_sites dstdomain "/etc/squid/blacklist/BL/drugs/urls"'
+    line: acl blocked_sites dstdomain "/etc/squid/blacklist/BL/drugs/urls"
+  notify: restart squid
+
+- name: Adding deny blocked_sites
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^http_access deny blocked_sites'
+    line: http_access deny blocked_sites
+  notify: restart squid
+
+- name: Squid whitelist
+  lineinfile:
+    path: /etc/squid/whitelist
+    regexp: '^.google.com'
+    line: .google.com
+    create: yes
+  notify: restart squid
+
+- name: Adding whitelist file
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^acl whitelist dstdomain "/etc/squid/whitelist"'
+    line: acl whitelist dstdomain "/etc/squid/whitelist"
+  notify: restart squid
+
+- name: Adding allow whitelist
+  lineinfile:
+    path: /etc/squid/squid.conf
+    regexp: '^http_access allow whitelist'
+    line: http_access allow whitelist
+  notify: restart squid
+
+- name: Start and enable squid service
+  service:
+    name: squid
+    state: started
+    enabled: yes
+

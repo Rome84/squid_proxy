@@ -1,0 +1,27 @@
+{
+    "builders": [{
+      "type": "amazon-ebs",
+      "region": "us-east-2",
+      "source_ami": "ami-0f2b4fc905b0bd1f1",
+      "instance_type": "t2.micro",
+      "ssh_username": "centos",
+      "ami_name": "squid-centos-ami-v1"
+    }],
+  
+    "provisioners": [
+     {
+        "type": "shell-local",
+        "command": "tar cf ../squid-centos-ami.tar ../squid-centos-ami"
+     },
+     {
+        "type": "file",
+        "source": "../squid-centos-ami.tar",
+        "destination": "/home/centos/squid-centos-ami.tar"
+     },
+     {
+        "type": "shell",
+        "script": "provision.sh"
+     }
+    ]
+  }
+  
